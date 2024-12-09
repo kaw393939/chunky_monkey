@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "document_processor"
+version = "0.1.0"
+description = "Document processing and chunking tool"
+requires-python = ">=3.8"
+dependencies = [
+    "aiofiles>=0.8.0",
+    "spacy>=3.0.0",
+    "tiktoken>=0.3.0",
+    "pydantic>=2.0.0",
+    "filelock>=3.0.0",
+]
+
+[project.scripts]
+docprocess = "document_processor.cli.commands:cli_main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["document_processor"]
+
+[tool.pytest.ini_options]
+addopts = "-ra -q"
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 88
+target-version = ["py38"]
+include = "\\.pyi?$"

@@ -1,0 +1,38 @@
+.
+├── .gitignore
+├── cli_commands.py
+├── corpus
+│   ├── byzantium.txt
+│   ├── carthage.txt
+│   ├── egypt.txt
+│   └── rogan.txt
+├── directory.txt
+├── docs
+│   └── README.md
+├── pyproject.toml
+├── setup.py
+├── src
+│   └── document_processor
+│       ├── __init__.py
+│       ├── cli
+│       │   ├── __init__.py
+│       │   └── commands.py
+│       ├── core
+│       │   ├── __init__.py
+│       │   ├── models.py
+│       │   ├── processor.py
+│       │   ├── tokenizer.py
+│       │   └── verifier.py
+│       ├── services
+│       │   ├── __init__.py
+│       │   ├── chunk_service.py
+│       │   ├── document_service.py
+│       │   └── metadata_service.py
+│       └── utils
+│           ├── __init__.py
+│           ├── config.py
+│           └── logging.py
+└── tests
+    └── __init__.py
+
+9 directories, 26 files
