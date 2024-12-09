@@ -23,7 +23,9 @@ from .models import (
     DateTimeEncoder,
     ProcessingState
 )
-from ..utils.config import AppConfig
+from document_processor.core.errors import ProcessingError
+
+from ..utils.config import AppConfig, MODEL_CONFIGS
 from ..services.metadata_service import MetadataManager
 from ..core.verifier import Verifier
 
@@ -32,14 +34,6 @@ import tiktoken
 import spacy
 
 logger = logging.getLogger(__name__)
-
-# -----------------------------------------------------------------------------
-# CUSTOM EXCEPTIONS
-# -----------------------------------------------------------------------------
-
-class ProcessingError(Exception):
-    """Custom exception for processing errors."""
-    pass
 
 # -----------------------------------------------------------------------------
 # TOKEN COUNTER PROTOCOL
@@ -71,44 +65,52 @@ class ProcessingProgress:
     def __init__(
         self, 
         total_files: int, 
-        processed_files: int, 
-        current_file: str, 
-        start_time: datetime, 
-        processed_chunks: int, 
-        total_tokens: int, 
-        current_chunk: int
+        processed_files: int = 0, 
+        current_file: str = "", 
+        start_time: Optional[datetime] = None, 
+        processed_chunks: int = 0, 
+        total_tokens: int = 0, 
+        current_chunk: int = 0
     ):
         self.total_files = total_files
         self.processed_files = processed_files
         self.current_file = current_file
-        self.start_time = start_time
+        self.start_time = start_time or datetime.now()
         self.processed_chunks = processed_chunks
         self.total_tokens = total_tokens
         self.current_chunk = current_chunk
         self.lock = asyncio.Lock()
     
-    async def update(self, progress: 'ProcessingProgress'):
-        """Updates the current progress."""
+    async def update_file_progress(self, file_name: str):
         async with self.lock:
-            self.processed_files = progress.processed_files
-            self.current_file = progress.current_file
-            self.processed_chunks = progress.processed_chunks
-            self.total_tokens = progress.total_tokens
-            self.current_chunk = progress.current_chunk
+            self.current_file = file_name
+    
+    async def increment_processed_files(self):
+        async with self.lock:
+            self.processed_files += 1
+            self.current_file = ""
+    
+    async def increment_chunks_tokens(self, chunks: int, tokens: int):
+        async with self.lock:
+            self.processed_chunks += chunks
+            self.total_tokens += tokens
     
     async def monitor(self):
         """Periodically logs the current processing progress."""
-        while True:
-            async with self.lock:
-                elapsed = datetime.now() - self.start_time
-                logger.info(
-                    f"Processed {self.processed_files}/{self.total_files} files. "
-                    f"Current file: {self.current_file}. "
-                    f"Processed chunks: {self.processed_chunks}. "
-                    f"Total tokens: {self.total_tokens}. "
-                    f"Elapsed time: {elapsed}"
-                )
-            await asyncio.sleep(5)  # Adjust the interval as needed
+        try:
+            while True:
+                async with self.lock:
+                    elapsed = datetime.now() - self.start_time
+                    logger.info(
+                        f"Processed {self.processed_files}/{self.total_files} files. "
+                        f"Current file: {self.current_file}. "
+                        f"Processed chunks: {self.processed_chunks}. "
+                        f"Total tokens: {self.total_tokens}. "
+                        f"Elapsed time: {elapsed}"
+                    )
+                await asyncio.sleep(5)  # Adjust the interval as needed
+        except asyncio.CancelledError:
+            logger.debug("Progress monitoring task cancelled.")
 
 # -----------------------------------------------------------------------------
 # CHUNKING LOGIC (CPU-BOUND)
@@ -149,7 +151,7 @@ def chunk_text_synchronously(text: str, doc_id: str, token_limit: int, token_cou
         return results
 
     chunks: List[Tuple[str, ChunkInfo]] = []
-    chunk_number = 0
+    chunk_number = 1  # Start from 1 for readability
     buffer = []
     buffer_tokens = 0
 
@@ -221,17 +223,17 @@ class TextProcessor:
     def __init__(
         self, 
         config: AppConfig,
+        chunk_reduction_factor: float = 1.0  # New parameter with default
     ):
         model_name = config.model_name
-        if model_name not in {
-            'gpt-3.5', 'gpt-4', 'gpt-4-32k', 'claude', 'claude-2', 'gpt-4o'
-        }:
-            raise ValueError(f"Unsupported model. Choose from: gpt-3.5, gpt-4, gpt-4-32k, claude, claude-2, gpt-4o")
+        if model_name not in MODEL_CONFIGS:
+            raise ValueError(f"Unsupported model. Choose from: {', '.join(MODEL_CONFIGS.keys())}")
         
         self.model_name = model_name
         self.model_config = config.model_configs[model_name]
         base_limit = self.model_config['tokens']
-        self.token_limit = int(base_limit * config.chunk_reduction_factor)
+        self.chunk_reduction_factor = chunk_reduction_factor
+        self.token_limit = int(base_limit * self.chunk_reduction_factor)
 
         try:
             self.token_counter = TiktokenCounter(self.model_config['encoding'])
@@ -260,27 +262,39 @@ class TextProcessor:
     
     async def _write_json(self, path: Path, data: dict):
         """Writes a dictionary to a JSON file asynchronously."""
-        async with aiofiles.open(path, 'w', encoding='utf-8') as f:
-            json_str = json.dumps(data, indent=2, cls=DateTimeEncoder)
-            await f.write(json_str)
+        try:
+            async with aiofiles.open(path, 'w', encoding='utf-8') as f:
+                json_str = json.dumps(data, indent=2, cls=DateTimeEncoder)
+                await f.write(json_str)
+        except Exception as e:
+            logger.error(f"Error writing JSON to {path}: {e}")
+            raise ProcessingError(f"Error writing JSON to {path}: {e}") from e
     
     async def _write_chunk(self, chunk_text: str, chunk_info: ChunkInfo, doc_dir: Path):
         """Writes chunk text and metadata to files."""
-        chunks_dir = doc_dir / "chunks"
-        chunks_dir.mkdir(exist_ok=True)
-        
-        chunk_path = chunks_dir / f"{chunk_info.id}.txt"
-        meta_path = chunks_dir / f"{chunk_info.id}.json"
-        
-        async with aiofiles.open(chunk_path, 'w', encoding='utf-8') as f:
-            await f.write(chunk_text)
-        
-        await self._write_json(meta_path, chunk_info.model_dump())
+        try:
+            chunks_dir = doc_dir / "chunks"
+            chunks_dir.mkdir(exist_ok=True)
+            
+            chunk_path = chunks_dir / f"{chunk_info.id}.txt"
+            meta_path = chunks_dir / f"{chunk_info.id}.json"
+            
+            async with aiofiles.open(chunk_path, 'w', encoding='utf-8') as f:
+                await f.write(chunk_text)
+            
+            await self._write_json(meta_path, chunk_info.model_dump())
+        except Exception as e:
+            logger.error(f"Error writing chunk {chunk_info.id}: {e}")
+            raise ProcessingError(f"Error writing chunk {chunk_info.id}: {e}") from e
     
     async def _save_processing_state(self, state: 'ProcessingState', doc_dir: Path):
         """Saves the current processing state."""
-        state_path = doc_dir / "processing_state.json"
-        await self._write_json(state_path, state.model_dump())
+        try:
+            state_path = doc_dir / "processing_state.json"
+            await self._write_json(state_path, state.model_dump())
+        except Exception as e:
+            logger.error(f"Error saving processing state for {state.doc_id}: {e}")
+            raise ProcessingError(f"Error saving processing state for {state.doc_id}: {e}") from e
     
     @staticmethod
     def calculate_md5(content: str) -> str:
@@ -311,7 +325,11 @@ class TextProcessor:
 
         source_dir = doc_dir / "source"
         source_dir.mkdir(exist_ok=True)
-        shutil.copy2(input_path, source_dir / input_path.name)
+        try:
+            shutil.copy2(input_path, source_dir / input_path.name)
+        except Exception as e:
+            logger.error(f"Error copying file {input_path} to {source_dir}: {e}")
+            raise ProcessingError(f"Error copying file {input_path} to {source_dir}: {e}") from e
 
         state = ProcessingState(
             doc_id=doc_id,
@@ -326,32 +344,40 @@ class TextProcessor:
         try:
             async with aiofiles.open(input_path, 'r', encoding='utf-8') as f:
                 content = await f.read()
+            
+            if not content.strip():
+                logger.warning(f"File {input_path} is empty. Skipping.")
+                raise ProcessingError(f"File {input_path} is empty.")
 
             chunks = await self.chunk_document_async(content, doc_id)
 
+            if not chunks:
+                logger.warning(f"No chunks created for file {input_path}. Skipping.")
+                raise ProcessingError(f"No chunks created for file {input_path}.")
+
+            total_chunks = len(chunks)
+            total_tokens = sum(chunk_info.tokens for _, chunk_info in chunks)
+
+            # Write all chunks
             for chunk_text, chunk_info in chunks:
-                progress.current_chunk = chunk_info.number
-                progress.processed_chunks += 1
-                progress.total_tokens += chunk_info.tokens
-                # If you have a bytes_processed attribute, uncomment below
-                # progress.bytes_processed += len(chunk_text.encode('utf-8'))
-                await self.progress_tracker.update(progress)
-                
+                await self._write_chunk(chunk_text, chunk_info, doc_dir)
                 state.current_chunk = chunk_info.number
                 state.processed_chunks.append(chunk_info.id)
-                
-                await self._write_chunk(chunk_text, chunk_info, doc_dir)
-                await self._save_processing_state(state, doc_dir)
+
+            # Update progress
+            await self.progress_tracker.increment_processed_files()
+            await self.progress_tracker.increment_chunks_tokens(total_chunks, total_tokens)
 
             state.is_complete = True
             await self._save_processing_state(state, doc_dir)
 
+            # Create DocumentInfo
             doc_info = DocumentInfo(
                 id=doc_id,
                 filename=input_path.name,
                 original_path=str(source_dir / input_path.name),
-                total_chunks=len(chunks),
-                total_tokens=sum(info.tokens for _, info in chunks),
+                total_chunks=total_chunks,
+                total_tokens=total_tokens,
                 total_chars=len(content),
                 total_lines=content.count('\n') + 1,
                 model_name=self.model_name,
@@ -361,6 +387,7 @@ class TextProcessor:
                 chunks=[info for _, info in chunks]
             )
 
+            # Update Manifest
             manifest = await self.metadata_manager.create_or_update_manifest(
                 doc_info,
                 output_dir,
@@ -371,170 +398,37 @@ class TextProcessor:
             doc_info.version_id = manifest.version_history[-1].version_id
             doc_info.manifest_id = manifest.manifest_id
             
+            # Track Processing
             metadata = await self.metadata_manager.track_processing(manifest, doc_info, output_dir)
             
+            # Write Document Info
             await self._write_json(doc_dir / "document_info.json", doc_info.model_dump())
-            
+
+            # Update Processing Status
             await self.metadata_manager.update_processing_status(metadata, output_dir, "completed")
-            
+
             return doc_info
 
+        except ProcessingError as pe:
+            logger.error(f"Processing failed for {input_path}: {pe}")
+            state.error_message = str(pe)
+            await self._cleanup_incomplete_processing(doc_dir, state)
+            if metadata:
+                await self.metadata_manager.update_processing_status(metadata, output_dir, "failed", str(pe))
+            raise pe
         except Exception as e:
-            logger.error(f"Error processing file {input_path}: {e}")
+            logger.error(f"Unexpected error processing file {input_path}: {e}")
             state.error_message = str(e)
             await self._cleanup_incomplete_processing(doc_dir, state)
             if metadata:
                 await self.metadata_manager.update_processing_status(metadata, output_dir, "failed", str(e))
-            raise ProcessingError(f"Failed to process file {input_path}: {e}") from e
+            raise ProcessingError(f"Unexpected error processing file {input_path}: {e}") from e
 
     async def _cleanup_incomplete_processing(self, doc_dir: Path, state: 'ProcessingState'):
         """Cleans up in case of incomplete processing."""
         state.is_complete = False
         await self._save_processing_state(state, doc_dir)
         logger.error(f"Processing incomplete for doc {state.doc_id}. State saved.")
-
-    async def process_directory(self, input_dir: Path, output_dir: Path) -> List[DocumentInfo]:
-        """Processes all files in a directory asynchronously."""
-        input_path = Path(input_dir)
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        files = list(input_path.glob("**/*.txt"))
-        total_files = len(files)
-        
-        self.progress_tracker.total_files = total_files
-        
-        # Start monitoring progress
-        monitor_task = asyncio.create_task(self.progress_tracker.monitor())
-        results: List[DocumentInfo] = []
-
-        sem = Semaphore(self.max_concurrent_files)
-
-        async def worker(file_path: Path, idx: int):
-            async with sem:
-                progress = ProcessingProgress(
-                    total_files=total_files,
-                    processed_files=idx,
-                    current_file=file_path.name,
-                    start_time=datetime.now(),
-                    processed_chunks=0,
-                    total_tokens=0,
-                    current_chunk=0
-                )
-                try:
-                    doc_info = await self.process_file(file_path, output_path, progress)
-                    results.append(doc_info)
-                except ProcessingError as err:
-                    logger.error(f"Failed to process {file_path}: {err}")
-
-        await asyncio.gather(*(worker(file_path, i) for i, file_path in enumerate(files, 1)))
-
-        monitor_task.cancel()
-        try:
-            await monitor_task
-        except asyncio.CancelledError:
-            pass
-        
-        return results
-
-    async def update_document(
-        self,
-        doc_id: str,
-        content: str,
-        verify: bool = False,
-        verification_mode: str = 'strict'
-    ) -> Optional[DocumentInfo]:
-        """Updates an existing document with new content."""
-        # Locate the document directory
-        output_dir = Path(self.metadata_manager.config.output_dir)
-        doc_dir = output_dir / doc_id
-        if not doc_dir.exists():
-            logger.error(f"Document directory does not exist: {doc_dir}")
-            return None
-
-        # Read existing document info
-        doc_info_path = doc_dir / "document_info.json"
-        if not doc_info_path.exists():
-            logger.error(f"Document info not found: {doc_info_path}")
-            return None
-
-        async with aiofiles.open(doc_info_path, 'r', encoding='utf-8') as f:
-            doc_info_data = json.loads(await f.read())
-            doc_info = DocumentInfo(**doc_info_data)
-
-        # Update content
-        chunks = await self.chunk_document_async(content, doc_id)
-
-        # Clear existing chunks
-        chunks_dir = doc_dir / "chunks"
-        if chunks_dir.exists():
-            shutil.rmtree(chunks_dir)
-        chunks_dir.mkdir(exist_ok=True)
-
-        # Write new chunks
-        for chunk_text, chunk_info in chunks:
-            await self._write_chunk(chunk_text, chunk_info, doc_dir)
-
-        # Update document info
-        doc_info.total_chunks = len(chunks)
-        doc_info.total_tokens = sum(info.tokens for _, info in chunks)
-        doc_info.total_chars = len(content)
-        doc_info.total_lines = content.count('\n') + 1
-        doc_info.md5_hash = self.calculate_md5(content)
-        doc_info.file_size = len(content.encode('utf-8'))
-        doc_info.chunks = [info for _, info in chunks]
-        doc_info.processed_at = datetime.now().isoformat()
-
-        # Update manifest
-        manifest = await self.metadata_manager.create_or_update_manifest(
-            doc_info,
-            output_dir,
-            previous_version_id=doc_info.version_id,
-            changes_description="Document content updated."
-        )
-        doc_info.version_id = manifest.version_history[-1].version_id
-        doc_info.manifest_id = manifest.manifest_id
-
-        # Track processing
-        metadata = await self.metadata_manager.track_processing(manifest, doc_info, output_dir)
-
-        # Write updated document info
-        await self._write_json(doc_info_path, doc_info.model_dump())
-
-        # Update processing status
-        await self.metadata_manager.update_processing_status(metadata, output_dir, "completed")
-
-        # Optionally perform verification
-        if verify:
-            logger.info("Starting verification after update...")
-            is_valid = await self.verifier.verify_document(
-                doc_info=doc_info,
-                doc_dir=doc_dir,
-                mode=verification_mode
-            )
-            if is_valid:
-                logger.info(f"Verification passed for document {doc_id}.")
-            else:
-                logger.warning(f"Verification failed for document {doc_id}.")
-
-        logger.info(f"Successfully updated document: {doc_info.filename}")
-        return doc_info
-
-    async def delete_document(self, doc_id: str) -> bool:
-        """Deletes a document and its associated data."""
-        output_dir = Path(self.metadata_manager.config.output_dir)
-        doc_dir = output_dir / doc_id
-        if not doc_dir.exists():
-            logger.error(f"Document directory does not exist: {doc_dir}")
-            return False
-
-        try:
-            shutil.rmtree(doc_dir)
-            logger.info(f"Successfully deleted document directory: {doc_dir}")
-            return True
-        except Exception as e:
-            logger.error(f"Error deleting document {doc_id}: {e}")
-            return False
 
     async def cleanup(self):
         """Cleans up resources."""

@@ -3,7 +3,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="document_processor",
+    name="chunky_monkey",
     version="0.1.0",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
@@ -17,7 +17,7 @@ setup(
     ],
     entry_points={
         'console_scripts': [
-            'docprocess=document_processor.cli.commands:cli_main',
+            'chunky_monkey=document_processor.cli.commands:cli_main',
         ],
     },
     author="Your Name",

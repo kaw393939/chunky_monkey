@@ -7,6 +7,8 @@ from typing import Optional, Dict
 import uuid
 from datetime import datetime
 
+from document_processor.core.errors import ProcessingError
+
 from ..core.models import DocumentInfo, ContentManifest, ContentVersion, ProcessingMetadata, DateTimeEncoder
 from ..utils.config import AppConfig
 import aiofiles
@@ -30,9 +32,32 @@ class MetadataManager:
         manifest_exists = manifest_path.exists()
 
         if manifest_exists:
-            async with aiofiles.open(manifest_path, 'r') as f:
-                manifest_data = json.loads(await f.read())
-                manifest = ContentManifest(**manifest_data)
+            try:
+                async with aiofiles.open(manifest_path, 'r', encoding='utf-8') as f:
+                    content = await f.read()
+                    if not content.strip():
+                        logger.warning(f"Manifest file {manifest_path} is empty. Creating a new manifest.")
+                        manifest = ContentManifest(
+                            manifest_id=str(uuid.uuid4()),
+                            created_at=datetime.now().isoformat(),
+                            updated_at=datetime.now().isoformat(),
+                            version_history=[],
+                            document_ids=[],
+                            total_chunks=0,
+                            total_tokens=0,
+                            model_name=self.model_name,
+                            content_hashes=[],
+                            metadata={}
+                        )
+                    else:
+                        manifest_data = json.loads(content)
+                        manifest = ContentManifest(**manifest_data)
+            except json.JSONDecodeError as jde:
+                logger.error(f"JSON decode error for manifest {manifest_path}: {jde}")
+                raise ProcessingError(f"JSON decode error for manifest {manifest_path}: {jde}") from jde
+            except Exception as e:
+                logger.error(f"Error reading manifest {manifest_path}: {e}")
+                raise ProcessingError(f"Error reading manifest {manifest_path}: {e}") from e
         else:
             manifest = ContentManifest(
                 manifest_id=str(uuid.uuid4()),
@@ -62,8 +87,12 @@ class MetadataManager:
         manifest.content_hashes.append(doc_info.md5_hash)
         manifest.updated_at = datetime.now().isoformat()
 
-        await self._write_json(manifest_path, manifest.model_dump())
-        return manifest
+        try:
+            await self._write_json(manifest_path, manifest.model_dump())
+            return manifest
+        except Exception as e:
+            logger.error(f"Failed to update manifest {manifest_path}: {e}")
+            raise ProcessingError(f"Failed to update manifest {manifest_path}: {e}") from e
 
     async def track_processing(
         self,
@@ -94,9 +123,12 @@ class MetadataManager:
         )
         
         metadata_path = output_dir / f"processing_{metadata.processing_id}.json"
-        await self._write_json(metadata_path, metadata.model_dump())
-        
-        return metadata
+        try:
+            await self._write_json(metadata_path, metadata.model_dump())
+            return metadata
+        except Exception as e:
+            logger.error(f"Failed to track processing metadata {metadata_path}: {e}")
+            raise ProcessingError(f"Failed to track processing metadata {metadata_path}: {e}") from e
 
     async def update_processing_status(
         self,
@@ -117,11 +149,19 @@ class MetadataManager:
                 metadata.processing_stats["duration"] = (end_time - start_time).total_seconds()
         
         metadata_path = output_dir / f"processing_{metadata.processing_id}.json"
-        await self._write_json(metadata_path, metadata.model_dump())
+        try:
+            await self._write_json(metadata_path, metadata.model_dump())
+        except Exception as e:
+            logger.error(f"Failed to update processing metadata {metadata_path}: {e}")
+            raise ProcessingError(f"Failed to update processing metadata {metadata_path}: {e}") from e
 
     @staticmethod
     async def _write_json(path: Path, data: dict):
         """Writes a dictionary to a JSON file asynchronously."""
-        async with aiofiles.open(path, 'w', encoding='utf-8') as f:
-            json_str = json.dumps(data, indent=2, cls=DateTimeEncoder)
-            await f.write(json_str)
+        try:
+            async with aiofiles.open(path, 'w', encoding='utf-8') as f:
+                json_str = json.dumps(data, indent=2, cls=DateTimeEncoder)
+                await f.write(json_str)
+        except Exception as e:
+            logger.error(f"Error writing JSON to {path}: {e}")
+            raise ProcessingError(f"Error writing JSON to {path}: {e}") from e
