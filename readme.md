@@ -1,6 +1,6 @@
 # Chunky Monkey
 
-![Chunky Monkey Logo](https://example.com/logo.png) <!-- Replace with your actual logo URL -->
+<img src="chunkymonkey.webp" alt="Chunky Monkey" width="100"/>
 
 **Chunky Monkey** is a powerful command-line tool designed to process and manage large text documents by splitting them into manageable chunks based on token limits. Leveraging advanced tokenization libraries like [tiktoken](https://github.com/openai/tiktoken) and [spaCy](https://spacy.io/), Chunky Monkey ensures efficient and accurate text processing, making it ideal for applications in natural language processing, machine learning, and data analysis.
 
