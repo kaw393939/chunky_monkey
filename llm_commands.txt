@@ -1,0 +1,1 @@
+tree -I "__pycache__|*.pyc|*.pyo|.git|venv|*.egg-info" -H ./ > project_structure.txt

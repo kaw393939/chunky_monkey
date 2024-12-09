@@ -1,9 +1,8 @@
-"""Configuration settings for the document processor."""
+# File: src/document_processor/utils/config.py
 
-from pathlib import Path
-from typing import Dict, Any
+from pydantic import BaseModel, Field
+from typing import Dict, Union
 
-# Model configurations
 MODEL_CONFIGS = {
     'gpt-3.5': {'tokens': 4096, 'encoding': 'cl100k_base'},
     'gpt-4': {'tokens': 8192, 'encoding': 'cl100k_base'},
@@ -13,64 +12,25 @@ MODEL_CONFIGS = {
     'gpt-4o': {'tokens': 16384, 'encoding': 'cl100k_base'}
 }
 
-# Default settings
-DEFAULT_MODEL_NAME = "gpt-4"
-DEFAULT_SPACY_MODEL = "en_core_web_sm"
-MAX_CONCURRENT_FILES = 10
+class AppConfig(BaseModel):  # Renamed from Config to AppConfig
+    model_name: str = Field(default="gpt-4")
+    spacy_model: str = Field(default="en_core_web_sm")
+    max_concurrent_files: int = Field(default=10)
+    chunk_reduction_factor: float = Field(default=1.0)
+    output_dir: str = Field(default="output")
+    chunk_dir: str = Field(default="chunks")
 
-# Verification thresholds
-MAX_ALLOWED_TOKEN_DIFFERENCE = 5
-STRICT_SIMILARITY_THRESHOLD = 0.995
-LENIENT_SIMILARITY_THRESHOLD = 0.95
-TOKEN_SIMILARITY_THRESHOLD = 0.98
+    model_configs: Dict[str, Dict[str, Union[int, str]]] = Field(default_factory=lambda: MODEL_CONFIGS)
 
-# File paths
-DEFAULT_OUTPUT_DIR = Path("output")
-DEFAULT_CHUNK_DIR = Path("chunks")
-DEFAULT_MANIFEST_FILENAME = "manifest.json"
-DEFAULT_DOC_INFO_FILENAME = "document_info.json"
-
-# Processing settings
-DEFAULT_CHUNK_REDUCTION_FACTOR = 1.0
-MAX_RETRIES = 3
-RETRY_DELAY = 1.0  # seconds
-
-class Config:
-    """Configuration class for document processor settings."""
-    
-    def __init__(self, **kwargs: Dict[str, Any]):
-        self.model_name = kwargs.get('model_name', DEFAULT_MODEL_NAME)
-        self.spacy_model = kwargs.get('spacy_model', DEFAULT_SPACY_MODEL)
-        self.max_concurrent_files = kwargs.get('max_concurrent_files', MAX_CONCURRENT_FILES)
-        self.chunk_reduction_factor = kwargs.get('chunk_reduction_factor', DEFAULT_CHUNK_REDUCTION_FACTOR)
-        self.output_dir = Path(kwargs.get('output_dir', DEFAULT_OUTPUT_DIR))
-        self.chunk_dir = Path(kwargs.get('chunk_dir', DEFAULT_CHUNK_DIR))
-        
-        # Ensure model name is valid
-        if self.model_name not in MODEL_CONFIGS:
-            raise ValueError(f"Invalid model name. Choose from: {list(MODEL_CONFIGS.keys())}")
-        
-        # Set token limit based on model and reduction factor
-        base_limit = MODEL_CONFIGS[self.model_name]['tokens']
-        self.token_limit = int(base_limit * self.chunk_reduction_factor)
-        
-        # Create necessary directories
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.chunk_dir.mkdir(parents=True, exist_ok=True)
-
-    @property
-    def model_config(self) -> Dict[str, Any]:
-        """Get the configuration for the selected model."""
-        return MODEL_CONFIGS[self.model_name]
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert configuration to dictionary."""
-        return {
-            'model_name': self.model_name,
-            'spacy_model': self.spacy_model,
-            'max_concurrent_files': self.max_concurrent_files,
-            'chunk_reduction_factor': self.chunk_reduction_factor,
-            'output_dir': str(self.output_dir),
-            'chunk_dir': str(self.chunk_dir),
-            'token_limit': self.token_limit
+    model_config = {  # Defined as a class variable (dictionary)
+        "json_schema_extra": {
+            "example": {
+                "model_name": "gpt-4",
+                "spacy_model": "en_core_web_sm",
+                "max_concurrent_files": 10,
+                "chunk_reduction_factor": 1.0,
+                "output_dir": "output",
+                "chunk_dir": "chunks"
+            }
         }
+    }
